@@ -278,7 +278,7 @@ function normalizeRT(data, source) {
   const cm = colMap(data.columns);
   return data.rows.map(row => {
     const cells = row.cells;
-    const status   = cv(cells,cm['Task Status']) || cv(cells,cm['Status']) || 'Unknown';
+    const status   = source === 'CP' ? 'Complete' : (cv(cells,cm['Task Status']) || cv(cells,cm['Status']) || 'Unknown');
     const reqDue   = cv(cells,cm['Requested Due Date']);
     const created  = cv(cells,cm['Project Created Date']) || cv(cells,cm['Created']);
     const daysRaw  = parseFloat(cv(cells,cm['Days to Completion']));
