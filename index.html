@@ -153,6 +153,7 @@ tbody tr:last-child td { border-bottom: none; }
     <option>Submitted</option><option>Assigned</option><option>In Progress</option>
     <option>Review</option><option>In Production</option><option>On Hold</option><option>Complete</option>
   </select></div>
+  <div class="fg"><label>Month</label><select id="f-month" onchange="applyFilters()"><option value="All">All months</option></select></div>
   <div class="fg"><label>Source</label><select id="f-source" onchange="applyFilters()">
     <option value="All">All sheets</option>
     <option value="RT">RT — Request Tracker</option>
@@ -364,24 +365,32 @@ function hideError() { document.getElementById('error-banner').style.display='no
 function buildFilterOptions() {
   const brands    = [...new Set(RAW.map(r=>r.brand).filter(b=>b&&b!=='—'&&VALID_BRANDS.includes(b)))].sort((a,b)=>a.localeCompare(b));
   const customers = [...new Set(RAW.map(r=>r.customer).filter(c=>c&&c!=='—'&&c!=='No customer assigned'))].sort();
+  const months    = [...new Set(RAW.map(r=>r.createdMonth).filter(Boolean))].sort().reverse();
   populateSelect('f-brand', brands);
   populateSelect('f-customer', customers);
+  populateSelectLabeled('f-month', months, m => fmtM(m));
 }
 function populateSelect(id, values) {
   const el = document.getElementById(id);
   while(el.options.length>1) el.remove(1);
   values.forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=v; el.appendChild(o); });
 }
+function populateSelectLabeled(id, values, labelFn) {
+  const el = document.getElementById(id);
+  while(el.options.length>1) el.remove(1);
+  values.forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=labelFn(v); el.appendChild(o); });
+}
 function applyFilters() {
-  const brand=v('f-brand'), customer=v('f-customer'), status=v('f-status'), source=v('f-source');
+  const brand=v('f-brand'), customer=v('f-customer'), status=v('f-status'), source=v('f-source'), month=v('f-month');
   filtered = RAW.filter(r=>
     (brand==='All'||r.brand===brand)&&(customer==='All'||r.customer===customer)&&
-    (status==='All'||r.status===status)&&(source==='All'||r.source===source)
+    (status==='All'||r.status===status)&&(source==='All'||r.source===source)&&
+    (month==='All'||r.createdMonth===month)
   );
   render();
 }
 function resetFilters() {
-  ['f-brand','f-customer','f-status','f-source'].forEach(id=>document.getElementById(id).value='All');
+  ['f-brand','f-customer','f-status','f-source','f-month'].forEach(id=>document.getElementById(id).value='All');
   filtered=[...RAW]; render();
 }
 function v(id) { return document.getElementById(id).value; }
