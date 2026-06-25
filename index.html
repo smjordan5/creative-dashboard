@@ -153,6 +153,7 @@ tbody tr:last-child td { border-bottom: none; }
     <option>Submitted</option><option>Assigned</option><option>In Progress</option>
     <option>Review</option><option>In Production</option><option>On Hold</option><option>Complete</option>
   </select></div>
+  <div class="fg"><label>Year</label><select id="f-year" onchange="applyFilters()"><option value="All">All years</option></select></div>
   <div class="fg"><label>Month</label><select id="f-month" onchange="applyFilters()"><option value="All">All months</option></select></div>
   <div class="fg"><label>Source</label><select id="f-source" onchange="applyFilters()">
     <option value="All">All sheets</option>
@@ -366,8 +367,10 @@ function buildFilterOptions() {
   const brands    = [...new Set(RAW.map(r=>r.brand).filter(b=>b&&b!=='—'&&VALID_BRANDS.includes(b)))].sort((a,b)=>a.localeCompare(b));
   const customers = [...new Set(RAW.map(r=>r.customer).filter(c=>c&&c!=='—'&&c!=='No customer assigned'))].sort();
   const months    = [...new Set(RAW.map(r=>r.createdMonth).filter(Boolean))].sort().reverse();
+  const years     = [...new Set(months.map(m=>m.slice(0,4)))].sort().reverse();
   populateSelect('f-brand', brands);
   populateSelect('f-customer', customers);
+  populateSelect('f-year', years);
   populateSelectLabeled('f-month', months, m => fmtM(m));
 }
 function populateSelect(id, values) {
@@ -381,16 +384,17 @@ function populateSelectLabeled(id, values, labelFn) {
   values.forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=labelFn(v); el.appendChild(o); });
 }
 function applyFilters() {
-  const brand=v('f-brand'), customer=v('f-customer'), status=v('f-status'), source=v('f-source'), month=v('f-month');
+  const brand=v('f-brand'), customer=v('f-customer'), status=v('f-status'), source=v('f-source'), month=v('f-month'), year=v('f-year');
   filtered = RAW.filter(r=>
     (brand==='All'||r.brand===brand)&&(customer==='All'||r.customer===customer)&&
     (status==='All'||r.status===status)&&(source==='All'||r.source===source)&&
-    (month==='All'||r.createdMonth===month)
+    (month==='All'||r.createdMonth===month)&&
+    (year==='All'||!!(r.createdMonth&&r.createdMonth.startsWith(year)))
   );
   render();
 }
 function resetFilters() {
-  ['f-brand','f-customer','f-status','f-source','f-month'].forEach(id=>document.getElementById(id).value='All');
+  ['f-brand','f-customer','f-status','f-source','f-month','f-year'].forEach(id=>document.getElementById(id).value='All');
   filtered=[...RAW]; render();
 }
 function v(id) { return document.getElementById(id).value; }
@@ -439,11 +443,16 @@ function renderStatusPipeline() {
 
 function renderCustomerBars() {
   const counts={};
-  filtered.forEach(r=>{ const k=r.customer||'—'; counts[k]=(counts[k]||0)+1; });
+  // Exclude DMC unified rows — they appear separately as the DTC bar below
+  filtered.forEach(r=>{ if(r.source==='DMC') return; const k=r.customer||'—'; counts[k]=(counts[k]||0)+1; });
 
-  // Add DTC (DMC) as its own row using DMC_RAW filtered by brand
-  const brand = v('f-brand');
-  const dmcRows = brand==='All' ? DMC_RAW : DMC_RAW.filter(r=>r.brand===brand);
+  // Add DTC (DMC) as its own row using DMC_RAW filtered by brand + month + year
+  const brand = v('f-brand'), dmcMonth = v('f-month'), dmcYear = v('f-year');
+  const dmcRows = DMC_RAW.filter(r=>
+    (brand==='All'||r.brand===brand)&&
+    (dmcMonth==='All'||r.createdMonth===dmcMonth)&&
+    (dmcYear==='All'||!!(r.createdMonth&&r.createdMonth.startsWith(dmcYear)))
+  );
   if (dmcRows.length > 0) counts['DTC (DMC campaigns)'] = (counts['DTC (DMC campaigns)']||0) + dmcRows.length;
 
   // Pull out "No customer assigned" to always show at bottom
@@ -572,8 +581,12 @@ function renderTimeline() {
 }
 
 function renderDMC() {
-  const brand = v('f-brand');
-  const rows  = brand==='All' ? DMC_RAW : DMC_RAW.filter(r=>r.brand===brand);
+  const brand = v('f-brand'), dmcMonth2 = v('f-month'), dmcYear2 = v('f-year');
+  const rows = DMC_RAW.filter(r=>
+    (brand==='All'||r.brand===brand)&&
+    (dmcMonth2==='All'||r.createdMonth===dmcMonth2)&&
+    (dmcYear2==='All'||!!(r.createdMonth&&r.createdMonth.startsWith(dmcYear2)))
+  );
   const total=rows.length, complete=rows.filter(r=>r.status==='Complete').length;
   const active=rows.filter(r=>r.status==='In Progress'||r.status==='In Review').length;
   const canceled=rows.filter(r=>r.status==='Canceled').length;
