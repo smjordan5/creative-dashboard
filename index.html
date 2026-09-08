@@ -238,7 +238,7 @@ const VALID_BRANDS  = ['uniball','POSCA','LAMY','UBC (combination)'];
 // Active statuses only (FIX 3)
 const ACTIVE_STATUSES = ['Submitted','Assigned','In Progress','Review','In Production','On Hold'];
 
-let RAW=[], DMC_RAW=[], filtered=[], charts={};
+let RAW=[], DMC_RAW=[], DMC_CAMPAIGNS=[], filtered=[], charts={};
 
 async function fetchSheet(key) {
   const res = await fetch(`${API_BASE}?sheet=${key}`);
@@ -265,6 +265,16 @@ function normBrand(b) {
   if (/posca/i.test(b)) return 'POSCA';
   if (/lamy/i.test(b)) return 'LAMY';
   return b;
+}
+
+// Groups DMC rows into campaigns by normalized "Primary Product Features" text.
+// Rows with no usable description (blank/TBD/placeholder) can't be reliably
+// matched to siblings, so each stands alone rather than risk merging unrelated rows.
+function campaignKey(feature) {
+  if (!feature) return null;
+  const norm = feature.trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!norm || norm === '(campaign)' || /^tbd$/i.test(norm)) return null;
+  return norm;
 }
 
 // FIX 1: date formatter
@@ -295,35 +305,85 @@ function normalizeRT(data, source) {
       brand, customer, status,
       dueDate: reqDue||null,
       daysOpen: isNaN(daysRaw)?null:Math.abs(daysRaw),
-      isOverdue, createdMonth,
+      isOverdue, createdMonth, createdDate: created||null,
     };
   });
 }
 
 function normalizeDMC(data) {
   const cm = colMap(data.columns);
-  const raw=[], unified=[];
+  const raw=[];
   for (const row of data.rows) {
     const cells = row.cells;
     const type   = cv(cells,cm['Type']) || '';
     const status = cv(cells,cm['Status']) || '';
     const send   = cv(cells,cm['Send Date']) || null;
     const feature = cv(cells,cm['Primary Product Features'])||cv(cells,cm['Description/Offer'])||cv(cells,cm['Subject Line'])||'(campaign)';
-    if (!send && !type && !status) continue;
+    // Week/month rollup rows (e.g. "April 2024", "Week 1") carry a Send Date but
+    // no channel Type — real per-channel campaign rows always have one. Skipping
+    // these keeps them from showing up as bogus one-off "campaigns" once grouped.
+    if (!type) continue;
     let createdMonth = null;
     if (send) { const d = new Date(send); if (!isNaN(d)) createdMonth = d.toISOString().slice(0,7); }
-    const statusMap = {'Complete':'Complete','Canceled':'On Hold','In Review':'Review','In Progress':'In Progress'};
     const normBrandVal = normBrand(cv(cells,cm['Brand'])||'UBC (combination)');
-    raw.push({ type: type||'Other', status: status||'Unknown', brand: normBrandVal, send, feature, createdMonth });
-    unified.push({
-      source:'DMC', reqNum:'—',
-      title: feature.length>80 ? feature.slice(0,77)+'…' : feature,
-      brand: normBrandVal, customer:'uni Brands',
-      status: statusMap[status] || 'Unknown',
-      dueDate: send||null, daysOpen:null, isOverdue:false, createdMonth,
-    });
+    raw.push({ type, status: status||'Unknown', brand: normBrandVal, send, feature, createdMonth });
   }
-  return { raw, unified };
+
+  // Group channel rows sharing the same campaign description into one campaign.
+  const groups = new Map();
+  let soloCounter = 0;
+  raw.forEach(r => {
+    const key = campaignKey(r.feature) || `__solo_${soloCounter++}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  });
+
+  const isComplete = s => s === 'Complete';
+  const isCanceled = s => /^cancell?ed/i.test(s); // catches "Canceled" and "Cancelled" (LAMY rows use the double-L spelling)
+  // When channels within a campaign disagree on status, prefer surfacing
+  // whichever pending state is "most active" so the campaign reads as in-flight.
+  const PENDING_PRIORITY = ['In Progress','Ready to Schedule','Assigned','Pause'];
+
+  const campaigns = [];
+  groups.forEach(members => {
+    let status;
+    if (members.every(m => isComplete(m.status))) {
+      status = 'Complete';
+    } else if (members.every(m => isCanceled(m.status))) {
+      status = members[0].status; // preserve original text, e.g. messy free-text variants
+    } else {
+      const pending = members.find(m => !isComplete(m.status) && !isCanceled(m.status));
+      if (pending) {
+        status = PENDING_PRIORITY.find(p => members.some(m => m.status === p)) || pending.status;
+      } else {
+        status = 'Complete'; // only complete + canceled channels, nothing left pending
+      }
+    }
+    const brandCounts = {};
+    members.forEach(m => brandCounts[m.brand] = (brandCounts[m.brand]||0)+1);
+    const brand = Object.entries(brandCounts).sort((a,b)=>b[1]-a[1])[0][0];
+    const sends = members.map(m=>m.send).filter(Boolean).sort();
+    const earliestSend = sends[0] || null; // campaign's kickoff date, for month bucketing
+    let createdMonth = null;
+    if (earliestSend) { const d = new Date(earliestSend); if (!isNaN(d)) createdMonth = d.toISOString().slice(0,7); }
+    campaigns.push({
+      brand, status, send: earliestSend, createdMonth,
+      feature: members[0].feature,
+      channels: [...new Set(members.map(m=>m.type))],
+      rowCount: members.length,
+    });
+  });
+
+  const statusMap = {'Complete':'Complete','Canceled':'On Hold','In Progress':'In Progress'};
+  const unified = campaigns.map(c => ({
+    source:'DMC', reqNum:'—',
+    title: c.feature.length>80 ? c.feature.slice(0,77)+'…' : c.feature,
+    brand: c.brand, customer:'uni Brands',
+    status: statusMap[c.status] || (isCanceled(c.status) ? 'On Hold' : c.status),
+    dueDate: c.send||null, daysOpen:null, isOverdue:false, createdMonth: c.createdMonth, createdDate: c.send||null,
+  }));
+
+  return { raw, campaigns, unified };
 }
 
 async function loadAll() {
@@ -336,14 +396,15 @@ async function loadAll() {
 
     const rt = normalizeRT(rtData, 'RT');
     const cp = normalizeRT(cpData, 'CP');
-    const { raw: dmcRaw, unified: dmcUnified } = normalizeDMC(dmcData);
+    const { raw: dmcRaw, campaigns: dmcCampaigns, unified: dmcUnified } = normalizeDMC(dmcData);
 
     RAW     = [...rt, ...cp, ...dmcUnified];
     DMC_RAW = dmcRaw;
+    DMC_CAMPAIGNS = dmcCampaigns;
     filtered = [...RAW];
 
     const ts = new Date().toLocaleString();
-    set('meta-counts', `RT: ${rt.length.toLocaleString()} · CP: ${cp.length.toLocaleString()} · DMC: ${dmcRaw.length.toLocaleString()} campaigns`);
+    set('meta-counts', `RT: ${rt.length.toLocaleString()} · CP: ${cp.length.toLocaleString()} · DMC: ${dmcCampaigns.length.toLocaleString()} campaigns (${dmcRaw.length.toLocaleString()} sends)`);
     set('last-refresh', `Refreshed ${ts}`);
     set('refresh-ts', ts);
 
@@ -403,8 +464,7 @@ function render() { renderKPIs(); renderStatusPipeline(); renderCustomerBars(); 
 
 function renderKPIs() {
   const total    = filtered.length;
-  const ACTIVE   = ['In Progress','Review','In Production'];
-  const open     = filtered.filter(r=>(r.source==='RT'||r.source==='DMC')&&ACTIVE.includes(r.status)).length;
+  const open     = filtered.filter(r=>(r.source==='RT'||r.source==='DMC')&&ACTIVE_STATUSES.includes(r.status)).length;
   const complete = filtered.filter(r=>r.status==='Complete').length;
   const withDue  = filtered.filter(r=>r.dueDate&&r.status==='Complete').length;
   const pct      = withDue ? Math.round(withDue/Math.max(complete,1)*100) : 0;
@@ -446,9 +506,9 @@ function renderCustomerBars() {
   // Exclude DMC unified rows — they appear separately as the DTC bar below
   filtered.forEach(r=>{ if(r.source==='DMC') return; const k=r.customer||'—'; counts[k]=(counts[k]||0)+1; });
 
-  // Add DTC (DMC) as its own row using DMC_RAW filtered by brand + month + year
+  // Add DTC (DMC) as its own row using DMC_CAMPAIGNS filtered by brand + month + year
   const brand = v('f-brand'), dmcMonth = v('f-month'), dmcYear = v('f-year');
-  const dmcRows = DMC_RAW.filter(r=>
+  const dmcRows = DMC_CAMPAIGNS.filter(r=>
     (brand==='All'||r.brand===brand)&&
     (dmcMonth==='All'||r.createdMonth===dmcMonth)&&
     (dmcYear==='All'||!!(r.createdMonth&&r.createdMonth.startsWith(dmcYear)))
@@ -582,14 +642,18 @@ function renderTimeline() {
 
 function renderDMC() {
   const brand = v('f-brand'), dmcMonth2 = v('f-month'), dmcYear2 = v('f-year');
-  const rows = DMC_RAW.filter(r=>
+  const inScope = r =>
     (brand==='All'||r.brand===brand)&&
     (dmcMonth2==='All'||r.createdMonth===dmcMonth2)&&
-    (dmcYear2==='All'||!!(r.createdMonth&&r.createdMonth.startsWith(dmcYear2)))
-  );
-  const total=rows.length, complete=rows.filter(r=>r.status==='Complete').length;
-  const active=rows.filter(r=>r.status==='In Progress'||r.status==='In Review').length;
-  const canceled=rows.filter(r=>r.status==='Canceled').length;
+    (dmcYear2==='All'||!!(r.createdMonth&&r.createdMonth.startsWith(dmcYear2)));
+
+  // Total/Complete/Active/Canceled + status breakdown reflect deduped campaigns
+  // (rows sharing the same Primary Product Features text count as one campaign).
+  const campaignRows = DMC_CAMPAIGNS.filter(inScope);
+  const isCanceled = s => /^cancell?ed/i.test(s||''); // catches "Canceled" and "Cancelled" (LAMY rows use the double-L spelling)
+  const total=campaignRows.length, complete=campaignRows.filter(r=>r.status==='Complete').length;
+  const canceled=campaignRows.filter(r=>isCanceled(r.status)).length;
+  const active=total-complete-canceled;
   set('d-total',    total.toLocaleString());
   set('d-complete', complete.toLocaleString());
   set('d-complete-sub', total ? Math.round(complete/total*100)+'% completion rate' : '');
@@ -598,7 +662,7 @@ function renderDMC() {
 
   // FIX 5: replace DMC status donut with simple bars
   const sc={};
-  rows.forEach(r=>{ const s=r.status||'Unknown'; sc[s]=(sc[s]||0)+1; });
+  campaignRows.forEach(r=>{ const s=r.status||'Unknown'; sc[s]=(sc[s]||0)+1; });
   const scEntries = Object.entries(sc).sort((a,b)=>b[1]-a[1]);
   const scMax = scEntries[0]?.[1]||1;
   document.getElementById('dmc-status-bars').innerHTML = scEntries.map(([s,n])=>`
@@ -610,6 +674,9 @@ function renderDMC() {
       <div class="bar-count">${n}</div>
     </div>`).join('');
 
+  // Channel mix and sends-over-time stay row-level — they're about send volume
+  // per channel, not campaign count, so grouping doesn't apply here.
+  const rows = DMC_RAW.filter(inScope);
   const tc={};
   rows.forEach(r=>{ if(r.type) tc[r.type]=(tc[r.type]||0)+1; });
   const ts=Object.entries(tc).sort((a,b)=>b[1]-a[1]), tmax=ts[0]?.[1]||1;
@@ -631,8 +698,18 @@ function renderDMC() {
 }
 
 function renderTable() {
-  const show=filtered.slice(0,30);
-  set('tbl-count',`Showing ${show.length} of ${filtered.length.toLocaleString()}`);
+  // Recent requests: newest-added first, completed items excluded, DMC excluded (DMC has its own section).
+  // This view only — doesn't affect KPIs/charts, which still use the full `filtered` set.
+  const recent = filtered
+    .filter(r => r.status !== 'Complete' && r.source !== 'DMC')
+    .slice()
+    .sort((a,b) => {
+      const da = a.createdDate ? new Date(a.createdDate).getTime() : -Infinity;
+      const db = b.createdDate ? new Date(b.createdDate).getTime() : -Infinity;
+      return db - da;
+    });
+  const show=recent.slice(0,30);
+  set('tbl-count',`Showing ${show.length} of ${recent.length.toLocaleString()}`);
   document.getElementById('tbl-body').innerHTML = show.map(r=>{
     const bc='b-'+(r.status||'').toLowerCase().replace(/ /g,'');
     return `<tr>
