@@ -237,6 +237,8 @@ const CUST_COLORS   = ['#2f54eb','#531dab','#0891b2','#d97706','#059669','#dc262
 const VALID_BRANDS  = ['uniball','POSCA','LAMY','UBC (combination)'];
 // Active statuses only (FIX 3)
 const ACTIVE_STATUSES = ['Submitted','Assigned','In Progress','Review','In Production','On Hold'];
+// Statuses counted toward the headline "Open" KPI (On Hold excluded on purpose)
+const OPEN_COUNT_STATUSES = ACTIVE_STATUSES.filter(s => s !== 'On Hold');
 
 let RAW=[], DMC_RAW=[], DMC_CAMPAIGNS=[], filtered=[], charts={};
 
@@ -464,7 +466,7 @@ function render() { renderKPIs(); renderStatusPipeline(); renderCustomerBars(); 
 
 function renderKPIs() {
   const total    = filtered.length;
-  const open     = filtered.filter(r=>(r.source==='RT'||r.source==='DMC')&&ACTIVE_STATUSES.includes(r.status)).length;
+  const open     = filtered.filter(r=>(r.source==='RT'||r.source==='DMC')&&OPEN_COUNT_STATUSES.includes(r.status)).length;
   const complete = filtered.filter(r=>r.status==='Complete').length;
   const withDue  = filtered.filter(r=>r.dueDate&&r.status==='Complete').length;
   const pct      = withDue ? Math.round(withDue/Math.max(complete,1)*100) : 0;
@@ -558,7 +560,7 @@ function renderBrandSection() {
     const brandRows = filtered;
     const total     = brandRows.length;
     const complete  = brandRows.filter(r=>r.status==='Complete').length;
-    const open      = brandRows.filter(r=>ACTIVE_STATUSES.includes(r.status)).length;
+    const open      = brandRows.filter(r=>OPEN_COUNT_STATUSES.includes(r.status)).length;
     const withDue   = brandRows.filter(r=>r.dueDate&&r.status==='Complete').length;
     const onTimePct = withDue ? Math.round(withDue/Math.max(complete,1)*100) : 0;
     const days      = brandRows.filter(r=>r.daysOpen!=null&&r.daysOpen>0).map(r=>r.daysOpen).sort((a,b)=>a-b);
