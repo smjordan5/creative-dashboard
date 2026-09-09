@@ -71,6 +71,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .status-complete-callout .label { font-size: 12px; color: var(--ink-mid); display: flex; align-items: center; gap: 6px; }
 .status-complete-callout .val { font-size: 20px; font-weight: 800; color: #22c55e; }
 
+.cb-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.cb-head .card-title, .cb-head .card-sub { margin-bottom: 0; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 7px; padding: 2px; background: var(--bg); flex-shrink: 0; }
+.seg-btn { border: none; background: transparent; font-size: 11px; font-weight: 600; color: var(--ink-mid); padding: 5px 10px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+.seg-btn.active { background: var(--card); color: var(--accent); box-shadow: var(--shadow); }
+.cb-footnote { font-size: 11px; color: var(--ink-muted); margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--rule); }
 .bar-list { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
 .bar-row { display: flex; align-items: center; gap: 10px; }
 .bar-label { width: 130px; font-size: 12px; color: var(--ink-mid); flex-shrink: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -186,8 +192,16 @@ tbody tr:last-child td { border-bottom: none; }
     </div>
   </div>
   <!-- FIX 2: corrected subtitle -->
-  <div class="card"><div class="card-title">Requests by retailer / channel</div><div class="card-sub">Request volume by customer or channel</div>
+  <div class="card">
+    <div class="cb-head">
+      <div><div class="card-title">Requests by retailer / channel</div><div class="card-sub" id="customer-bars-sub">Request volume by customer or channel</div></div>
+      <div class="seg" id="cb-toggle" role="group" aria-label="View mode">
+        <button type="button" class="seg-btn" data-mode="volume" onclick="setCustomerBarMode('volume')">Volume</button>
+        <button type="button" class="seg-btn" data-mode="effort" onclick="setCustomerBarMode('effort')">Weighted by complexity</button>
+      </div>
+    </div>
     <div class="bar-list" id="customer-bars"></div>
+    <div class="cb-footnote" id="customer-bars-footnote"></div>
   </div>
 </div>
 
@@ -241,6 +255,7 @@ const ACTIVE_STATUSES = ['Submitted','Assigned','In Progress','Review','In Produ
 const OPEN_COUNT_STATUSES = ACTIVE_STATUSES.filter(s => s !== 'On Hold');
 
 let RAW=[], DMC_RAW=[], DMC_CAMPAIGNS=[], filtered=[], charts={};
+let customerBarMode='effort'; // 'volume' | 'effort' — which metric the retailer/channel chart shows
 
 async function fetchSheet(key) {
   const res = await fetch(`${API_BASE}?sheet=${key}`);
@@ -259,6 +274,19 @@ function cv(cells, colId) {
   const val = c.displayValue ?? c.value ?? null;
   if (val === null || val === undefined) return null;
   return String(val).trim();
+}
+// Complexity weighting: only literal S/M/L/XL/XXL ratings are trusted. Completed
+// Projects and Packaging Projects both store a numeric 1-10 scale in the same
+// "Complexity" field name, but that numeric scale is NOT treated as a stand-in
+// rating — it's ignored entirely — because RT and CP share the same picklist,
+// and once a CP request's rating flows over from RT it will show up as a real
+// letter and get picked up automatically here.
+const COMPLEXITY_LETTER_WEIGHTS = { S:1, M:2, L:3, XL:4, XXL:5 };
+const DEFAULT_COMPLEXITY_WEIGHT = 2; // "M" — used when a request has no letter rating and no business-rule override
+function complexityWeight(raw) {
+  if (raw === null || raw === undefined || raw === '') return null;
+  const s = String(raw).trim().toUpperCase();
+  return COMPLEXITY_LETTER_WEIGHTS[s] !== undefined ? COMPLEXITY_LETTER_WEIGHTS[s] : null;
 }
 function normBrand(b) {
   if (!b) return '—';
@@ -301,6 +329,12 @@ function normalizeRT(data, source) {
     let createdMonth = null;
     if (created) { const d = new Date(created); if (!isNaN(d)) createdMonth = d.toISOString().slice(0,7); }
     const isOverdue = !!(reqDue && status !== 'Complete' && new Date(reqDue) < new Date());
+    const rawComplexity = cv(cells,cm['Complexity']);
+    const cw = complexityWeight(rawComplexity);
+    // Business rule: Packaging Projects requests don't carry a meaningful per-item
+    // rating today, so every one of them is treated as "L" outright rather than
+    // falling back to the generic default.
+    const isPackaging = source === 'PKG';
     return {
       source, reqNum: cv(cells,cm['Request Number'])||'—',
       title: cv(cells,cm['Request Title'])||cv(cells,cm['Request Name'])||'(untitled)',
@@ -308,6 +342,12 @@ function normalizeRT(data, source) {
       dueDate: reqDue||null,
       daysOpen: isNaN(daysRaw)?null:Math.abs(daysRaw),
       isOverdue, createdMonth, createdDate: created||null,
+      complexityWeight: isPackaging ? COMPLEXITY_LETTER_WEIGHTS.L : (cw ?? DEFAULT_COMPLEXITY_WEIGHT),
+      hasComplexity: cw !== null,
+      // Packaging's weight is an assumed business rule, not a measured rating —
+      // exclude it from the "% rated" coverage stat so that stat stays honest
+      // about actual per-item data quality.
+      ratable: !isPackaging,
     };
   });
 }
@@ -394,19 +434,31 @@ async function loadAll() {
   try {
     const rtData  = await fetchSheet('RT');  setMsg('Loading CP…');
     const cpData  = await fetchSheet('CP');  setMsg('Loading DMC…');
-    const dmcData = await fetchSheet('DMC');
+    const dmcData = await fetchSheet('DMC'); setMsg('Loading Packaging…');
+
+    // Packaging Projects is a newer source and the backend route for it may not
+    // exist yet. Fetch it defensively so a missing/failing endpoint just means
+    // "no packaging data this session" rather than breaking the whole dashboard.
+    let pkg = [];
+    try {
+      const pkgData = await fetchSheet('PKG');
+      pkg = normalizeRT(pkgData, 'PKG');
+    } catch (pkgErr) {
+      console.warn('Packaging Projects source unavailable (backend route may not exist yet):', pkgErr.message);
+    }
 
     const rt = normalizeRT(rtData, 'RT');
     const cp = normalizeRT(cpData, 'CP');
     const { raw: dmcRaw, campaigns: dmcCampaigns, unified: dmcUnified } = normalizeDMC(dmcData);
 
-    RAW     = [...rt, ...cp, ...dmcUnified];
+    RAW     = [...rt, ...cp, ...pkg, ...dmcUnified];
     DMC_RAW = dmcRaw;
     DMC_CAMPAIGNS = dmcCampaigns;
     filtered = [...RAW];
 
     const ts = new Date().toLocaleString();
-    set('meta-counts', `RT: ${rt.length.toLocaleString()} · CP: ${cp.length.toLocaleString()} · DMC: ${dmcCampaigns.length.toLocaleString()} campaigns (${dmcRaw.length.toLocaleString()} sends)`);
+    const pkgLabel = pkg.length ? ` · PKG: ${pkg.length.toLocaleString()}` : '';
+    set('meta-counts', `RT: ${rt.length.toLocaleString()} · CP: ${cp.length.toLocaleString()}${pkgLabel} · DMC: ${dmcCampaigns.length.toLocaleString()} campaigns (${dmcRaw.length.toLocaleString()} sends)`);
     set('last-refresh', `Refreshed ${ts}`);
     set('refresh-ts', ts);
 
@@ -503,39 +555,84 @@ function renderStatusPipeline() {
   set('status-complete-count', counts['Complete'].toLocaleString());
 }
 
-function renderCustomerBars() {
-  const counts={};
-  // Exclude DMC unified rows — they appear separately as the DTC bar below
-  filtered.forEach(r=>{ if(r.source==='DMC') return; const k=r.customer||'—'; counts[k]=(counts[k]||0)+1; });
+function setCustomerBarMode(mode) {
+  customerBarMode = mode;
+  renderCustomerBars();
+}
 
-  // Add DTC (DMC) as its own row using DMC_CAMPAIGNS filtered by brand + month + year
+function renderCustomerBars() {
+  const isEffort = customerBarMode === 'effort';
+  const counts={};      // request volume, per customer/channel
+  const effort={};      // sum of complexity weights, per customer/channel
+  let ratedCount=0, ratableCount=0; // data-completeness tracking — excludes DMC & Packaging, which use flat business-rule weights rather than a per-item rating
+
+  // Exclude DMC unified rows — they appear separately as the DTC bar below.
+  // Packaging Projects rows (source: PKG) stay in this loop and fold into their
+  // real Customer field (e.g. a Packaging/Amazon request adds into the "Amazon" bar).
+  filtered.forEach(r=>{
+    if(r.source==='DMC') return;
+    const k=r.customer||'—';
+    counts[k]=(counts[k]||0)+1;
+    effort[k]=(effort[k]||0)+r.complexityWeight;
+    if (r.ratable) {
+      ratableCount++;
+      if (r.hasComplexity) ratedCount++;
+    }
+  });
+
+  // Add DTC (DMC) as its own row using DMC_CAMPAIGNS filtered by brand + month + year.
+  // DMC campaigns don't carry a per-row complexity rating, so this bar is a flat
+  // business-rule assumption: every DTC campaign counts as "S" complexity.
   const brand = v('f-brand'), dmcMonth = v('f-month'), dmcYear = v('f-year');
   const dmcRows = DMC_CAMPAIGNS.filter(r=>
     (brand==='All'||r.brand===brand)&&
     (dmcMonth==='All'||r.createdMonth===dmcMonth)&&
     (dmcYear==='All'||!!(r.createdMonth&&r.createdMonth.startsWith(dmcYear)))
   );
-  if (dmcRows.length > 0) counts['DTC (DMC campaigns)'] = (counts['DTC (DMC campaigns)']||0) + dmcRows.length;
+  if (dmcRows.length > 0) {
+    counts['DTC (DMC campaigns)'] = (counts['DTC (DMC campaigns)']||0) + dmcRows.length;
+    effort['DTC (DMC campaigns)'] = (effort['DTC (DMC campaigns)']||0) + dmcRows.length * COMPLEXITY_LETTER_WEIGHTS.S;
+  }
+
+  const data = isEffort ? effort : counts;
 
   // Pull out "No customer assigned" to always show at bottom
-  const noCustomer = counts['No customer assigned'] || 0;
-  delete counts['No customer assigned'];
+  const noCustomer = data['No customer assigned'] || 0;
+  delete data['No customer assigned'];
 
-  const sorted = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,10);
+  const sorted = Object.entries(data).sort((a,b)=>b[1]-a[1]).slice(0,10);
   if (noCustomer > 0) sorted.push(['No customer assigned', noCustomer]);
   const max = Math.max(...sorted.map(e=>e[1]), 1);
 
   // Use purple for DTC row to tie it visually to DMC
-  document.getElementById('customer-bars').innerHTML = sorted.map(([name,count],i) => {
+  document.getElementById('customer-bars').innerHTML = sorted.map(([name,val],i) => {
     const isDTC = name === 'DTC (DMC campaigns)';
     const isNoCustomer = name === 'No customer assigned';
     const color = isDTC ? '#531dab' : isNoCustomer ? '#9ca3af' : CUST_COLORS[i % CUST_COLORS.length];
+    const displayVal = isEffort ? Math.round(val).toLocaleString() : val.toLocaleString();
     return `<div class="bar-row">
       <div class="bar-label" title="${name}">${name}</div>
-      <div class="bar-track"><div class="bar-fill" style="width:${Math.round(count/max*100)}%;background:${color}"></div></div>
-      <div class="bar-count">${count}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${Math.round(val/max*100)}%;background:${color}"></div></div>
+      <div class="bar-count">${displayVal}</div>
     </div>`;
   }).join('');
+
+  // Toggle button active states
+  document.querySelectorAll('#cb-toggle .seg-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === customerBarMode);
+  });
+
+  // Subtitle + footnote
+  const sub = document.getElementById('customer-bars-sub');
+  const footnote = document.getElementById('customer-bars-footnote');
+  if (isEffort) {
+    sub.textContent = 'Estimated effort by customer or channel (requests weighted by complexity)';
+    const pct = ratableCount > 0 ? Math.round((ratedCount/ratableCount)*100) : 0;
+    footnote.textContent = `${pct}% of Request Tracker / Completed Projects requests have an explicit S–XXL complexity rating; the rest default to "Medium." DTC (DMC) campaigns are assumed "Small," and Packaging Projects requests are assumed "Large" — both are flat assumptions, not per-item ratings.`;
+  } else {
+    sub.textContent = 'Request volume by customer or channel';
+    footnote.textContent = '';
+  }
 }
 
 // FIX 4: Show brand mix vs brand detail based on filter
