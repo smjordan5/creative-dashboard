@@ -581,7 +581,7 @@ function renderKPIs() {
   set('k-complete', complete.toLocaleString());
   set('k-median',   median!=null ? median+'d' : '—');
   set('k-median-sub', avg
-    ? `avg ${avg}d · n=${days.length}${computedCount ? ` (${computedCount} computed from Created→Completed, no "Days to Completion" on file)` : ''}`
+    ? `avg ${avg}d · n=${days.length}${computedCount ? ` (from project creation → project completion)` : ''}`
     : '');
 }
 
