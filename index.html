@@ -224,6 +224,7 @@ tbody tr:last-child td { border-bottom: none; }
     <div class="dmc-kpi"><div class="kpi-val" id="d-active">—</div><div class="kpi-name">Active / planned</div></div>
     <div class="dmc-kpi"><div class="kpi-val" id="d-canceled">—</div><div class="kpi-name">Canceled</div></div>
   </div>
+  <p id="dmc-brand-note" style="margin-top:10px;font-size:11px;color:rgba(255,255,255,0.55);"></p>
 </div>
 <div class="row3">
   <div class="dmc-card"><div class="card-title">Status breakdown</div><div class="card-sub">DMC only</div>
@@ -313,7 +314,10 @@ function normBrand(b) {
 // matched to siblings, so each stands alone rather than risk merging unrelated rows.
 function campaignKey(feature) {
   if (!feature) return null;
-  const norm = feature.trim().toLowerCase().replace(/\s+/g, ' ');
+  let norm = feature.trim().toLowerCase().replace(/\s+/g, ' ');
+  // Strip wrapping quote marks so a quoted copy of a message ("Oops!...") merges
+  // with its unquoted sibling instead of fragmenting into a separate campaign.
+  norm = norm.replace(/^["'“”‘’]+|["'“”‘’]+$/g, '');
   if (!norm || norm === '(campaign)' || /^tbd$/i.test(norm)) return null;
   return norm;
 }
@@ -380,15 +384,25 @@ function normalizeDMC(data) {
     if (isBeforeCutoff(send)) continue; // exclude sends before the cutoff
     let createdMonth = null;
     if (send) { const d = new Date(send); if (!isNaN(d)) createdMonth = d.toISOString().slice(0,7); }
-    const normBrandVal = normBrand(cv(cells,cm['Brand'])||'UBC (combination)');
-    raw.push({ type, status: status||'Unknown', brand: normBrandVal, send, feature, createdMonth });
+    const rawBrand = cv(cells,cm['Brand']);
+    const brandMissing = !rawBrand; // track this before the fallback default masks it
+    const normBrandVal = normBrand(rawBrand||'UBC (combination)');
+    raw.push({ type, status: status||'Unknown', brand: normBrandVal, brandMissing, send, feature, createdMonth });
   }
 
-  // Group channel rows sharing the same campaign description into one campaign.
+  // Group channel rows sharing the same campaign description into one campaign —
+  // but only within the same month. Some copy (evergreen banners, automated
+  // flow messages like cart-abandonment or win-back emails) reuses identical
+  // text across many separate weeks/months; keying on text alone would collapse
+  // dozens of distinct campaign instances into one. Adding the send month to the
+  // key keeps same-week multi-channel sends merged (Email + SMS + Banner all
+  // firing for one campaign) while still splitting recurring content back out
+  // per month it actually ran.
   const groups = new Map();
   let soloCounter = 0;
   raw.forEach(r => {
-    const key = campaignKey(r.feature) || `__solo_${soloCounter++}`;
+    const textKey = campaignKey(r.feature);
+    const key = textKey ? `${textKey}::${r.createdMonth || 'nodate'}` : `__solo_${soloCounter++}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(r);
   });
@@ -796,6 +810,14 @@ function renderDMC() {
   // Channel mix and sends-over-time stay row-level — they're about send volume
   // per channel, not campaign count, so grouping doesn't apply here.
   const rows = DMC_RAW.filter(inScope);
+  const brandMissingCount = rows.filter(r=>r.brandMissing).length;
+  const brandNote = document.getElementById('dmc-brand-note');
+  if (rows.length > 0 && brandMissingCount > 0) {
+    const pct = Math.round(brandMissingCount/rows.length*100);
+    brandNote.textContent = `${pct}% of sends in view have no Brand set on the source row and default to "UBC (combination)" — brand-filtered views may undercount POSCA/uniball/LAMY-specific DMC activity.`;
+  } else {
+    brandNote.textContent = '';
+  }
   const tc={};
   rows.forEach(r=>{ if(r.type) tc[r.type]=(tc[r.type]||0)+1; });
   const ts=Object.entries(tc).sort((a,b)=>b[1]-a[1]), tmax=ts[0]?.[1]||1;
