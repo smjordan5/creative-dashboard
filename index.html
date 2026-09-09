@@ -147,6 +147,7 @@ tbody tr:last-child td { border-bottom: none; }
     <span class="src-pill dmc">DMC</span> Digital Marketing Campaigns &nbsp;
     <span id="meta-counts"></span>
   </div>
+  <div class="sub" style="margin-top:2px;">Showing data from Jan 1, 2025 onward · requests with no date on file are still included</div>
 </div>
 
 <div id="error-banner"></div>
@@ -288,6 +289,17 @@ function complexityWeight(raw) {
   const s = String(raw).trim().toUpperCase();
   return COMPLEXITY_LETTER_WEIGHTS[s] !== undefined ? COMPLEXITY_LETTER_WEIGHTS[s] : null;
 }
+
+// Data cutoff: nothing created/sent before this date is imported into the
+// dashboard at all — applies to every source (RT, CP, PKG, DMC) and therefore
+// every KPI, chart, and table that reads from them. Rows with no date on file
+// are kept rather than guessed at, since we can't confirm they're actually old.
+const DATA_CUTOFF = new Date('2025-01-01T00:00:00Z');
+function isBeforeCutoff(dateStr) {
+  if (!dateStr) return false;
+  const d = new Date(dateStr);
+  return !isNaN(d) && d < DATA_CUTOFF;
+}
 function normBrand(b) {
   if (!b) return '—';
   if (/ubc/i.test(b)) return 'UBC (combination)';
@@ -322,6 +334,7 @@ function normalizeRT(data, source) {
     const status   = source === 'CP' ? 'Complete' : (cv(cells,cm['Task Status']) || cv(cells,cm['Status']) || 'Unknown');
     const reqDue   = cv(cells,cm['Requested Due Date']);
     const created  = cv(cells,cm['Project Created Date']) || cv(cells,cm['Created']);
+    if (isBeforeCutoff(created)) return null; // exclude anything created before the cutoff
     const daysRaw  = parseFloat(cv(cells,cm['Days to Completion']));
     const customerRaw = cv(cells,cm['Customer']) || '';
     const customer = customerRaw.split(',')[0].trim() || 'No customer assigned';
@@ -349,7 +362,7 @@ function normalizeRT(data, source) {
       // about actual per-item data quality.
       ratable: !isPackaging,
     };
-  });
+  }).filter(Boolean);
 }
 
 function normalizeDMC(data) {
@@ -365,6 +378,7 @@ function normalizeDMC(data) {
     // no channel Type — real per-channel campaign rows always have one. Skipping
     // these keeps them from showing up as bogus one-off "campaigns" once grouped.
     if (!type) continue;
+    if (isBeforeCutoff(send)) continue; // exclude sends before the cutoff
     let createdMonth = null;
     if (send) { const d = new Date(send); if (!isNaN(d)) createdMonth = d.toISOString().slice(0,7); }
     const normBrandVal = normBrand(cv(cells,cm['Brand'])||'UBC (combination)');
