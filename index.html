@@ -339,6 +339,20 @@ function normalizeRT(data, source) {
     const created  = cv(cells,cm['Project Created Date']) || cv(cells,cm['Created']);
     if (isBeforeCutoff(created)) return null; // exclude anything created before the cutoff
     const daysRaw  = parseFloat(cv(cells,cm['Days to Completion']));
+    const actualCompletion = cv(cells,cm['Actual Completion Date']);
+    // Fall back to a computed turnaround (Actual Completion − Created) whenever
+    // "Days to Completion" itself is blank — that field depends on a manual/
+    // automation process that can lag behind, but the two raw dates are usually
+    // there as soon as a request is marked complete.
+    let daysOpen = isNaN(daysRaw) ? null : Math.abs(daysRaw);
+    let daysOpenIsComputed = false;
+    if (daysOpen == null && created && actualCompletion) {
+      const createdD = new Date(created), doneD = new Date(actualCompletion);
+      if (!isNaN(createdD) && !isNaN(doneD)) {
+        const diff = Math.round((doneD - createdD) / 86400000);
+        if (diff >= 0) { daysOpen = diff; daysOpenIsComputed = true; }
+      }
+    }
     const customerRaw = cv(cells,cm['Customer']) || '';
     const customer = customerRaw.split(',')[0].trim() || 'No customer assigned';
     const brand    = normBrand(cv(cells,cm['Brand']) || '—');
@@ -356,7 +370,7 @@ function normalizeRT(data, source) {
       title: cv(cells,cm['Request Title'])||cv(cells,cm['Request Name'])||'(untitled)',
       brand, customer, status,
       dueDate: reqDue||null,
-      daysOpen: isNaN(daysRaw)?null:Math.abs(daysRaw),
+      daysOpen, daysOpenIsComputed,
       isOverdue, createdMonth, createdDate: created||null,
       complexityWeight: isPackaging ? COMPLEXITY_LETTER_WEIGHTS.L : (cw ?? DEFAULT_COMPLEXITY_WEIGHT),
       hasComplexity: cw !== null,
@@ -559,13 +573,16 @@ function renderKPIs() {
   const days     = filtered.filter(r=>r.daysOpen!=null&&r.daysOpen>0).map(r=>r.daysOpen).sort((a,b)=>a-b);
   const median   = days.length ? days[Math.floor(days.length/2)] : null;
   const avg      = days.length ? (days.reduce((a,b)=>a+b,0)/days.length).toFixed(1) : null;
+  const computedCount = filtered.filter(r=>r.daysOpen!=null&&r.daysOpen>0&&r.daysOpenIsComputed).length;
 
   set('k-total',    total.toLocaleString());
   set('k-total-sub', [...new Set(filtered.map(r=>r.source))].join(' + '));
   set('k-open',     open.toLocaleString());
   set('k-complete', complete.toLocaleString());
   set('k-median',   median!=null ? median+'d' : '—');
-  set('k-median-sub', avg ? `avg ${avg}d · n=${days.length}` : '');
+  set('k-median-sub', avg
+    ? `avg ${avg}d · n=${days.length}${computedCount ? ` (${computedCount} computed from Created→Completed, no "Days to Completion" on file)` : ''}`
+    : '');
 }
 
 // FIX 3: Active-only status pipeline (no donut, just bars for open statuses + complete callout)
