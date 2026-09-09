@@ -147,7 +147,6 @@ tbody tr:last-child td { border-bottom: none; }
     <span class="src-pill dmc">DMC</span> Digital Marketing Campaigns &nbsp;
     <span id="meta-counts"></span>
   </div>
-  <div class="sub" style="margin-top:2px;">Showing data from Jan 1, 2025 onward · requests with no date on file are still included</div>
 </div>
 
 <div id="error-banner"></div>
@@ -601,9 +600,10 @@ function renderCustomerBars() {
     }
   });
 
-  // Add DTC (DMC) as its own row using DMC_CAMPAIGNS filtered by brand + month + year.
-  // DMC campaigns don't carry a per-row complexity rating, so this bar is a flat
-  // business-rule assumption: every DTC campaign counts as "S" complexity.
+  // Fold DMC campaigns into the same "DTC" bucket as non-campaign DTC requests
+  // from RT/CP/PKG (Customer = "DTC") — one combined DTC bar instead of two.
+  // DMC campaigns don't carry a per-row complexity rating, so they contribute a
+  // flat business-rule assumption: every DTC campaign counts as "S" complexity.
   const brand = v('f-brand'), dmcMonth = v('f-month'), dmcYear = v('f-year');
   const dmcRows = DMC_CAMPAIGNS.filter(r=>
     (brand==='All'||r.brand===brand)&&
@@ -611,8 +611,8 @@ function renderCustomerBars() {
     (dmcYear==='All'||!!(r.createdMonth&&r.createdMonth.startsWith(dmcYear)))
   );
   if (dmcRows.length > 0) {
-    counts['DTC (DMC campaigns)'] = (counts['DTC (DMC campaigns)']||0) + dmcRows.length;
-    effort['DTC (DMC campaigns)'] = (effort['DTC (DMC campaigns)']||0) + dmcRows.length * COMPLEXITY_LETTER_WEIGHTS.S;
+    counts['DTC'] = (counts['DTC']||0) + dmcRows.length;
+    effort['DTC'] = (effort['DTC']||0) + dmcRows.length * COMPLEXITY_LETTER_WEIGHTS.S;
   }
 
   const data = isEffort ? effort : counts;
@@ -625,9 +625,9 @@ function renderCustomerBars() {
   if (noCustomer > 0) sorted.push(['No customer assigned', noCustomer]);
   const max = Math.max(...sorted.map(e=>e[1]), 1);
 
-  // Use purple for DTC row to tie it visually to DMC
+  // Use purple for the DTC row to tie it visually to DMC campaigns folded into it
   document.getElementById('customer-bars').innerHTML = sorted.map(([name,val],i) => {
-    const isDTC = name === 'DTC (DMC campaigns)';
+    const isDTC = name === 'DTC';
     const isNoCustomer = name === 'No customer assigned';
     const color = isDTC ? '#531dab' : isNoCustomer ? '#9ca3af' : CUST_COLORS[i % CUST_COLORS.length];
     const displayVal = isEffort ? Math.round(val).toLocaleString() : val.toLocaleString();
@@ -648,8 +648,7 @@ function renderCustomerBars() {
   const footnote = document.getElementById('customer-bars-footnote');
   if (isEffort) {
     sub.textContent = 'Estimated effort by customer or channel (requests weighted by complexity)';
-    const pct = ratableCount > 0 ? Math.round((ratedCount/ratableCount)*100) : 0;
-    footnote.textContent = `${pct}% of Request Tracker / Completed Projects requests have an explicit S–XXL complexity rating; the rest default to "Medium." DTC (DMC) campaigns are assumed "Small," and Packaging Projects requests are assumed "Large" — both are flat assumptions, not per-item ratings.`;
+    footnote.textContent = `Complexity ratings reflect a mix of explicit request-level data and standard assumptions for certain categories.`;
   } else {
     sub.textContent = 'Request volume by customer or channel';
     footnote.textContent = '';
